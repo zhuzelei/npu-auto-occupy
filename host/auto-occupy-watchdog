@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+
+set -o pipefail
+
+CONFIG_FILE=${AUTO_OCCUPY_CONFIG:-/etc/default/auto-occupy-docker}
+if [[ -r "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+fi
+
+DOCKER_HOST_SOCKET=${DOCKER_HOST_SOCKET:-unix:///data/z00894965/docker-daemon/docker.sock}
+CONTAINER=${CONTAINER:-cann_900_torchtitan_master_zdp}
+HOST_BASE=${HOST_BASE:-/data/z00894965/code/auto-occupy}
+CONTAINER_BASE=${CONTAINER_BASE:-$HOST_BASE}
+CONTAINER_STATE_DIR=${CONTAINER_STATE_DIR:-$CONTAINER_BASE/.state}
+HOST_SSH_TARGET=${HOST_SSH_TARGET:-root@127.0.0.1}
+HOST_SSH_PORT=${HOST_SSH_PORT:-22}
+CANN_ENV_FILE=${CANN_ENV_FILE:-/usr/local/Ascend/cann/set_env.sh}
+CUSTOM_TRANSFORMER_ENV_FILE=${CUSTOM_TRANSFORMER_ENV_FILE:-/usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash}
+PYTHON_BIN=${PYTHON_BIN:-/usr/local/python3.11.15/bin/python}
+STATE_DIR=${STATE_DIR:-$HOST_BASE/.state}
+BASE=$HOST_BASE
+LOG_FILE=$STATE_DIR/auto-occupy.tsv
+ACTIVE_FILE=$STATE_DIR/auto.active
+RELEASE_FILE=$STATE_DIR/worker.release
+STARTING_FILE=$STATE_DIR/worker.starting
+CHECK_INTERVAL_SECONDS=${CHECK_INTERVAL_SECONDS:-30}
+IDLE_THRESHOLD_SECONDS=${IDLE_THRESHOLD_SECONDS:-1200}
+MEMORY_GIB_PER_DEVICE=${MEMORY_GIB_PER_DEVICE:-50}
+STATE_RECORD_INTERVAL_SECONDS=${STATE_RECORD_INTERVAL_SECONDS:-300}
+last_state=
+idle_since_epoch=0
+last_tsv_state=
+last_tsv_epoch=0
+
+log() { printf '%s auto-occupy-watchdog %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+event() { printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" "${2:-}" >> "$LOG_FILE"; }
+
+format_die_ranges() {
+    local csv_values=$1
+    local sorted_values
+    sorted_values=$(tr ',' '\n' <<< "$csv_values" | sed '/^$/d' | sort -n -u)
+    [[ -n "$sorted_values" ]] || return 0
+    awk 'function emit_range(start_die, end_die) {
+             if (start_die == end_die) printf "die%s", start_die
+             else printf "die%s-die%s", start_die, end_die
+         }
+         NR == 1 {start_die = previous_die = $1; next}
+         $1 == previous_die + 1 {previous_die = $1; next}
+         {emit_range(start_die, previous_die); printf ","; start_die = previous_die = $1}
+         END {if (NR > 0) emit_range(start_die, previous_die)}' <<< "$sorted_values"
+}
+
+append_state_record() {
+    local state=$1
+    local output=${2:-}
+    local idle_count=${3:-0}
+    local now_epoch
+    now_epoch=$(date +%s)
+
+    if [[ "$state" == "$last_tsv_state" ]] &&
+       (( now_epoch - last_tsv_epoch < STATE_RECORD_INTERVAL_SECONDS )); then
+        return 0
+    fi
+
+    local total_cards=0 total_dies=0 user_cards=0 auto_cards=0
+    local user_details= auto_details=
+    declare -A total_card_seen total_die_seen user_card_seen auto_card_seen
+    declare -A user_group_dies user_group_cwd user_group_docker
+    declare -A auto_group_dies auto_group_cwd auto_group_docker
+    local tag pid card_list card_count die_count die_list name cwd docker_name card die group_key
+
+    while IFS=$'\t' read -r tag pid card_list card_count die_count die_list name cwd docker_name; do
+        [[ "$tag" == PROC ]] || continue
+        IFS=',' read -ra cards <<< "$card_list"
+        for card in "${cards[@]}"; do
+            [[ -n "$card" ]] || continue
+            total_card_seen["$card"]=1
+            if [[ "$name" == auto-occupy ]]; then
+                auto_card_seen["$card"]=1
+            else
+                user_card_seen["$card"]=1
+            fi
+        done
+        IFS=',' read -ra dies <<< "$die_list"
+        for die in "${dies[@]}"; do
+            [[ -n "$die" ]] || continue
+            total_die_seen["$die"]=1
+        done
+        group_key="${cwd}"$'\034'"${docker_name}"
+        if [[ "$name" == auto-occupy ]]; then
+            auto_group_dies["$group_key"]+="${die_list},"
+            auto_group_cwd["$group_key"]=$cwd
+            auto_group_docker["$group_key"]=$docker_name
+        else
+            user_group_dies["$group_key"]+="${die_list},"
+            user_group_cwd["$group_key"]=$cwd
+            user_group_docker["$group_key"]=$docker_name
+        fi
+    done <<< "$output"
+
+    total_cards=${#total_card_seen[@]}
+    total_dies=${#total_die_seen[@]}
+    user_cards=${#user_card_seen[@]}
+    auto_cards=${#auto_card_seen[@]}
+
+    for group_key in "${!user_group_dies[@]}"; do
+        local die_label
+        die_label=$(format_die_ranges "${user_group_dies[$group_key]}")
+        user_details+="${user_details:+;}${die_label} cwd=${user_group_cwd[$group_key]} docker=${user_group_docker[$group_key]}"
+    done
+    for group_key in "${!auto_group_dies[@]}"; do
+        local die_label
+        die_label=$(format_die_ranges "${auto_group_dies[$group_key]}")
+        auto_details+="${auto_details:+;}${die_label} cwd=${auto_group_cwd[$group_key]} docker=${auto_group_docker[$group_key]}"
+    done
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$state" "$total_cards" "$total_dies" \
+        "$user_cards" "$auto_cards" "$idle_count" "$user_details" "$auto_details" >> "$LOG_FILE"
+    last_tsv_state=$state
+    last_tsv_epoch=$now_epoch
+}
+broadcast() {
+    printf '%s\n' '[NPU Auto-Occupy] NPU空闲20分钟，开始自动占用。释放：pkill -f auto-occupy' \
+        | wall >/dev/null 2>&1 || true
+}
+
+query_container() {
+    timeout 20 docker --host "$DOCKER_HOST_SOCKET" exec -i \
+        -e HOST_SSH_TARGET="$HOST_SSH_TARGET" \
+        -e HOST_SSH_PORT="$HOST_SSH_PORT" \
+        -e CONTAINER_SOURCE_DIR="$CONTAINER_BASE" \
+        "$CONTAINER" /bin/bash -s <<'REMOTE'
+set -o pipefail
+exec "$CONTAINER_SOURCE_DIR/query_host_npu.sh"
+REMOTE
+}
+
+has_user_process() {
+    awk -F '\t' '$1 == "PROC" && $7 != "auto-occupy" { found=1 }
+        END { exit(found ? 0 : 1) }' <<< "$1"
+}
+
+has_auto_process() {
+    awk -F '\t' '$1 == "PROC" && $7 == "auto-occupy" { found=1 }
+        END { exit(found ? 0 : 1) }' <<< "$1"
+}
+
+clear_released_state() {
+    rm -f "$ACTIVE_FILE" "$RELEASE_FILE" "$STARTING_FILE"
+    event AUTO_RELEASE_RESET 'worker absent; idle timer reset'
+}
+
+start_worker() {
+    rm -f "$RELEASE_FILE"
+    date +%s > "$STARTING_FILE"
+    if docker --host "$DOCKER_HOST_SOCKET" exec -d \
+        -e MEMORY_GIB_PER_DEVICE="$MEMORY_GIB_PER_DEVICE" \
+        -e CONTAINER_STATE_DIR="$CONTAINER_STATE_DIR" \
+        -e WORKER_RELEASE_FILE="$CONTAINER_STATE_DIR/worker.release" \
+        -e CANN_ENV_FILE="$CANN_ENV_FILE" \
+        -e CUSTOM_TRANSFORMER_ENV_FILE="$CUSTOM_TRANSFORMER_ENV_FILE" \
+        -e PYTHON_BIN="$PYTHON_BIN" \
+        -e CONTAINER_SOURCE_DIR="$CONTAINER_BASE" \
+        "$CONTAINER" /bin/bash -lc \
+        'set -e
+         mkdir -p "$CONTAINER_STATE_DIR"
+         [[ -z "$CANN_ENV_FILE" ]] || source "$CANN_ENV_FILE"
+         [[ -z "$CUSTOM_TRANSFORMER_ENV_FILE" ]] || source "$CUSTOM_TRANSFORMER_ENV_FILE"
+         exec "$PYTHON_BIN" "$CONTAINER_SOURCE_DIR/auto_occupy_worker.py"' \
+        >/dev/null; then
+        touch "$ACTIVE_FILE"
+        rm -f "$STARTING_FILE"
+        broadcast
+        event BROADCAST_OK 'NPU空闲20分钟，开始自动占用。释放：pkill -f auto-occupy'
+        event AUTO_START "memory_gib_per_device=$MEMORY_GIB_PER_DEVICE"
+        return 0
+    fi
+    event AUTO_START_ERROR 'docker exec worker launch failed'
+    rm -f "$STARTING_FILE" "$ACTIVE_FILE"
+    return 1
+}
+
+check_and_recover() {
+    local output state rc
+    if ! output=$(query_container 2>&1); then
+        rc=1
+        idle_since_epoch=0
+        state="QUERY_ERROR rc=$rc output=$(printf '%s' "$output" | tr '\n' ' ')"
+        append_state_record QUERY_ERROR '' 0
+        [[ "$state" == "$last_state" ]] || { log "$state"; last_state=$state; }
+        return 0
+    fi
+
+    if has_user_process "$output"; then
+        state=$(has_auto_process "$output" && echo USER_IN_USE_AND_AUTO_OCCUPIED || echo USER_IN_USE)
+        idle_since_epoch=0
+    elif has_auto_process "$output"; then
+        state=AUTO_OCCUPIED
+        idle_since_epoch=0
+        touch "$ACTIVE_FILE"
+    elif [[ -f "$RELEASE_FILE" ]]; then
+        clear_released_state
+        idle_since_epoch=0
+        state=IDLE
+    elif [[ -f "$ACTIVE_FILE" && -f "$STARTING_FILE" ]] &&
+         (( $(date +%s) - $(cat "$STARTING_FILE") < 120 )); then
+        state=AUTO_STARTING
+        idle_since_epoch=0
+    elif [[ -f "$ACTIVE_FILE" ]]; then
+        clear_released_state
+        idle_since_epoch=0
+        state=IDLE
+    else
+        now_epoch=$(date +%s)
+        if (( idle_since_epoch == 0 )); then
+            idle_since_epoch=$now_epoch
+        fi
+        idle_seconds=$((now_epoch - idle_since_epoch))
+        if (( idle_seconds >= IDLE_THRESHOLD_SECONDS )); then
+            if start_worker; then
+                state=AUTO_STARTING
+            else
+                state=AUTO_START_ERROR
+            fi
+            idle_since_epoch=0
+        else
+            state=IDLE
+        fi
+    fi
+
+    append_state_record "$state" "$output" 0
+    if [[ "$state" != "$last_state" ]]; then
+        if (( idle_since_epoch > 0 )); then
+            log "$state idle_seconds=$(( $(date +%s) - idle_since_epoch ))"
+        else
+            log "$state idle_seconds=0"
+        fi
+        last_state=$state
+    fi
+}
+
+while true; do
+    if ! docker --host "$DOCKER_HOST_SOCKET" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -qx true; then
+        state=container-not-running
+        idle_since_epoch=0
+        [[ "$state" == "$last_state" ]] || { log "$state"; last_state=$state; }
+    else
+        check_and_recover
+    fi
+    sleep "$CHECK_INTERVAL_SECONDS"
+done

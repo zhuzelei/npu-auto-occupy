@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+printf "%s\n" "❌ 禁止手动停止 auto-occupy-docker.service；如需释放 NPU，请执行：pkill -f auto-occupy"
+exit 1

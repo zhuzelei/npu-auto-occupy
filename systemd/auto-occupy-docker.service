@@ -1,0 +1,16 @@
+[Unit]
+Description=Auto-Occupy watchdog (manual stop refused; release with pkill -f auto-occupy)
+Requires=docker-z00894965.service
+After=docker-z00894965.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=AUTO_OCCUPY_CONFIG=@AUTO_OCCUPY_CONFIG@
+ExecStart=/usr/local/sbin/auto-occupy-watchdog
+Restart=always
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
