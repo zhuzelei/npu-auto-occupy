@@ -164,12 +164,12 @@ install -m 0644 "$REPO_ROOT/systemd/guard.conf" \
     /etc/systemd/system/auto-occupy-docker.service.d/guard.conf
 
 if [[ "$DOCKER_SERVICE_NAME" == none ]]; then
-    sed -e "s|@AUTO_OCCUPY_CONFIG@|$CONFIG_FILE|g" \
+    sed -e "s|/etc/default/auto-occupy-docker|$CONFIG_FILE|g" \
         -e '/^Requires=docker-z00894965.service$/d' \
         -e '/^After=docker-z00894965.service$/d' \
         "$REPO_ROOT/systemd/auto-occupy-docker.service" > "$unit_tmp"
 else
-    sed -e "s|@AUTO_OCCUPY_CONFIG@|$CONFIG_FILE|g" \
+    sed -e "s|/etc/default/auto-occupy-docker|$CONFIG_FILE|g" \
         -e "s/docker-z00894965.service/$DOCKER_SERVICE_NAME/g" \
         "$REPO_ROOT/systemd/auto-occupy-docker.service" > "$unit_tmp"
 fi

@@ -6,7 +6,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-Environment=AUTO_OCCUPY_CONFIG=@AUTO_OCCUPY_CONFIG@
+Environment=AUTO_OCCUPY_CONFIG=/etc/default/auto-occupy-docker
 ExecStart=/usr/local/sbin/auto-occupy-watchdog
 Restart=always
 RestartSec=5
