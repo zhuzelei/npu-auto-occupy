@@ -120,7 +120,7 @@ install -m 0755 "$REPO_ROOT/bin/auto_occupy_worker.py" "$HOST_BASE/auto_occupy_w
 
 # The data directory is normally bind-mounted into the container. Copying the
 # files explicitly also supports images where that mount is not present.
-docker_cmd exec "$CONTAINER_NAME" /bin/bash -lc 'mkdir -p "$1"' bash "$CONTAINER_BASE"
+docker_cmd exec "$CONTAINER_NAME" /bin/bash -lc 'mkdir -p "$1"' bash "$CONTAINER_BASE/.state"
 for name in auto_occupy.sh query_host_npu.sh auto_occupy_worker.py; do
     src="$HOST_BASE/$name"
     dst="$CONTAINER_BASE/$name"
@@ -134,7 +134,6 @@ docker_cmd exec "$CONTAINER_NAME" chmod 0755 \
     "$CONTAINER_BASE/auto_occupy.sh" \
     "$CONTAINER_BASE/query_host_npu.sh" \
     "$CONTAINER_BASE/auto_occupy_worker.py"
-docker_cmd exec "$CONTAINER_NAME" /bin/bash -lc 'mkdir -p "$1"' bash "$CONTAINER_BASE/.state"
 
 config_tmp=$(mktemp)
 unit_tmp=$(mktemp)

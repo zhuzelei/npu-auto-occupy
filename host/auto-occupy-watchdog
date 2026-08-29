@@ -19,7 +19,6 @@ CANN_ENV_FILE=${CANN_ENV_FILE:-/usr/local/Ascend/cann/set_env.sh}
 CUSTOM_TRANSFORMER_ENV_FILE=${CUSTOM_TRANSFORMER_ENV_FILE:-/usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash}
 PYTHON_BIN=${PYTHON_BIN:-/usr/local/python3.11.15/bin/python}
 STATE_DIR=${STATE_DIR:-$HOST_BASE/.state}
-BASE=$HOST_BASE
 LOG_FILE=$STATE_DIR/auto-occupy.tsv
 ACTIVE_FILE=$STATE_DIR/auto.active
 RELEASE_FILE=$STATE_DIR/worker.release
