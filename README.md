@@ -51,6 +51,15 @@ to `<host-base>/.state/auto-occupy.tsv`. Auto-start remains wall-clock based:
 the default idle threshold is 1200 seconds (20 minutes), polled every 30
 seconds.
 
+For a first smoke test, keep the 20-minute threshold but use a small worker:
+
+```bash
+sudo ./install.sh --memory-gib-per-device 1
+```
+
+Restore `--memory-gib-per-device 50` afterward if full-device occupancy is
+required.
+
 ## Operations
 
 ```bash
