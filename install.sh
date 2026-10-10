@@ -18,6 +18,8 @@ STATE_RECORD_INTERVAL_SECONDS=${STATE_RECORD_INTERVAL_SECONDS:-300}
 CANN_ENV_FILE=${CANN_ENV_FILE:-/usr/local/Ascend/cann/set_env.sh}
 CUSTOM_TRANSFORMER_ENV_FILE=${CUSTOM_TRANSFORMER_ENV_FILE:-/usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash}
 PYTHON_BIN=${PYTHON_BIN:-/usr/local/python3.11.15/bin/python}
+NPU_QUERY_BACKEND=${NPU_QUERY_BACKEND:-auto}
+NPU_IDLE_MAX_USED_MIB=${NPU_IDLE_MAX_USED_MIB:-512}
 CONFIG_FILE=${AUTO_OCCUPY_CONFIG:-/etc/default/auto-occupy-docker}
 START_SERVICE=1
 
@@ -43,6 +45,8 @@ Options:
   --cann-env PATH               CANN environment script inside the container
   --custom-transformer-env PATH Custom transformer environment script
   --python PATH                 Python executable inside the container
+  --query-backend NAME         NPU query backend: auto, npu-smi, or torch (default: auto)
+  --idle-max-used-mib N        Torch backend idle threshold per device (default: 512)
   --config PATH                 Watchdog configuration file
   --no-start                    Install and reload, but do not start the service
   -h, --help                    Show this help
@@ -78,6 +82,8 @@ while (($#)); do
         --cann-env) need_value "$1" "${2-}"; CANN_ENV_FILE=$2; shift 2 ;;
         --custom-transformer-env) need_value "$1" "${2-}"; CUSTOM_TRANSFORMER_ENV_FILE=$2; shift 2 ;;
         --python) need_value "$1" "${2-}"; PYTHON_BIN=$2; shift 2 ;;
+        --query-backend) need_value "$1" "${2-}"; NPU_QUERY_BACKEND=$2; shift 2 ;;
+        --idle-max-used-mib) need_value "$1" "${2-}"; NPU_IDLE_MAX_USED_MIB=$2; shift 2 ;;
         --config) need_value "$1" "${2-}"; CONFIG_FILE=$2; shift 2 ;;
         --no-start) START_SERVICE=0; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -91,6 +97,7 @@ done
 command -v docker >/dev/null 2>&1 || die 'docker command not found'
 command -v systemctl >/dev/null 2>&1 || die 'systemctl command not found'
 [[ -f "$REPO_ROOT/bin/auto_occupy.sh" ]] || die 'repository is incomplete: bin/auto_occupy.sh missing'
+[[ -f "$REPO_ROOT/bin/query_npu_torch.py" ]] || die 'repository is incomplete: bin/query_npu_torch.py missing'
 
 [[ "$HOST_BASE" = /* ]] || die '--host-base must be an absolute path'
 [[ "$CONTAINER_BASE" = /* ]] || die '--container-base must be an absolute path'
@@ -99,6 +106,9 @@ command -v systemctl >/dev/null 2>&1 || die 'systemctl command not found'
 [[ "$IDLE_THRESHOLD_SECONDS" =~ ^[0-9]+$ ]] || die '--idle-threshold must be numeric'
 [[ "$CHECK_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || die '--check-interval must be numeric'
 [[ "$STATE_RECORD_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || die '--state-record-interval must be numeric'
+[[ "$NPU_QUERY_BACKEND" =~ ^(auto|npu-smi|torch)$ ]] \
+    || die '--query-backend must be auto, npu-smi, or torch'
+[[ "$NPU_IDLE_MAX_USED_MIB" =~ ^[0-9]+$ ]] || die '--idle-max-used-mib must be numeric'
 
 if [[ "$DOCKER_HOST_SOCKET" = /* ]]; then
     DOCKER_HOST_SOCKET="unix://$DOCKER_HOST_SOCKET"
@@ -116,12 +126,13 @@ running=$(docker_cmd inspect -f '{{.State.Running}}' "$CONTAINER_NAME")
 install -d -m 0755 "$HOST_BASE" "$HOST_BASE/.state"
 install -m 0755 "$REPO_ROOT/bin/auto_occupy.sh" "$HOST_BASE/auto_occupy.sh"
 install -m 0755 "$REPO_ROOT/bin/query_host_npu.sh" "$HOST_BASE/query_host_npu.sh"
+install -m 0755 "$REPO_ROOT/bin/query_npu_torch.py" "$HOST_BASE/query_npu_torch.py"
 install -m 0755 "$REPO_ROOT/bin/auto_occupy_worker.py" "$HOST_BASE/auto_occupy_worker.py"
 
 # The data directory is normally bind-mounted into the container. Copying the
 # files explicitly also supports images where that mount is not present.
 docker_cmd exec "$CONTAINER_NAME" /bin/bash -lc 'mkdir -p "$1"' bash "$CONTAINER_BASE/.state"
-for name in auto_occupy.sh query_host_npu.sh auto_occupy_worker.py; do
+for name in auto_occupy.sh query_host_npu.sh query_npu_torch.py auto_occupy_worker.py; do
     src="$HOST_BASE/$name"
     dst="$CONTAINER_BASE/$name"
     host_hash=$(sha256sum "$src" | awk '{print $1}')
@@ -133,6 +144,7 @@ done
 docker_cmd exec "$CONTAINER_NAME" chmod 0755 \
     "$CONTAINER_BASE/auto_occupy.sh" \
     "$CONTAINER_BASE/query_host_npu.sh" \
+    "$CONTAINER_BASE/query_npu_torch.py" \
     "$CONTAINER_BASE/auto_occupy_worker.py"
 
 config_tmp=$(mktemp)
@@ -153,6 +165,8 @@ trap 'rm -f "$config_tmp" "$unit_tmp"' EXIT
     printf 'CANN_ENV_FILE=%q\n' "$CANN_ENV_FILE"
     printf 'CUSTOM_TRANSFORMER_ENV_FILE=%q\n' "$CUSTOM_TRANSFORMER_ENV_FILE"
     printf 'PYTHON_BIN=%q\n' "$PYTHON_BIN"
+    printf 'NPU_QUERY_BACKEND=%q\n' "$NPU_QUERY_BACKEND"
+    printf 'NPU_IDLE_MAX_USED_MIB=%q\n' "$NPU_IDLE_MAX_USED_MIB"
 } > "$config_tmp"
 install -D -m 0644 "$config_tmp" "$CONFIG_FILE"
 

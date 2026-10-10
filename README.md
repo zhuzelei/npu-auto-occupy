@@ -20,6 +20,26 @@
 - watchdog、探测脚本和 worker 不能继续删除；删除任意一个都会破坏计时、状态记录或自动拉起。
 - 手动停止保护仍保留，用于给出释放提示；真正释放请使用 `pkill -f auto-occupy`。
 
+### 无 `npu-smi` 环境
+
+探测脚本默认使用 `auto` 后端：宿主机上的 `npu-smi` 查询成功时保持原有
+进程探测逻辑；否则在容器内使用 `torch_npu` 的 `device_count()` 和
+`mem_get_info()` 判断每张卡的显存占用。
+
+Torch 后端采用保守策略。只有每张卡的已用显存都不超过
+`NPU_IDLE_MAX_USED_MIB`（默认 512 MiB）时才报告空闲；查询失败、返回值异常
+或未发现 NPU 时均返回错误，watchdog 不会累计空闲时间。Torch 无法枚举其他
+进程的 PID，因此该后端只能判断显存是否接近空闲，不能替代 `npu-smi` 的进程
+级信息。
+
+可以在安装时显式选择后端和阈值：
+
+```bash
+sudo ./install.sh --query-backend torch --idle-max-used-mib 512
+```
+
+`--query-backend auto` 是默认值，也可设置为 `npu-smi`，使查询失败时不回退。
+
 ### 状态快照（9 列）
 
 状态行用于统计某一时刻的 NPU 使用情况。状态变化立即记录；同一状态最多
@@ -142,6 +162,7 @@ pkill -f auto-occupy
 ```text
 bin/auto_occupy.sh             容器内手工入口（非常驻）
 bin/query_host_npu.sh          容器内 NPU 进程探测
+bin/query_npu_torch.py         无 npu-smi 时的保守 Torch 显存探测
 bin/auto_occupy_worker.py      NPU worker，进程名为 auto-occupy
 host/auto-occupy-watchdog      宿主 systemd watchdog
 systemd/auto-occupy-docker.service

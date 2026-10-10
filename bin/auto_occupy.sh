@@ -15,6 +15,8 @@ HOST_SSH_PORT=${HOST_SSH_PORT:-22}
 CANN_ENV_FILE=${CANN_ENV_FILE:-/usr/local/Ascend/cann/set_env.sh}
 CUSTOM_TRANSFORMER_ENV_FILE=${CUSTOM_TRANSFORMER_ENV_FILE:-/usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash}
 PYTHON_BIN=${PYTHON_BIN:-/usr/local/python3.11.15/bin/python}
+NPU_QUERY_BACKEND=${NPU_QUERY_BACKEND:-auto}
+NPU_IDLE_MAX_USED_MIB=${NPU_IDLE_MAX_USED_MIB:-512}
 
 mkdir -p "$STATE_DIR"
 
@@ -26,6 +28,9 @@ log_event() {
 
 query_output() {
     HOST_SSH_TARGET="$HOST_SSH_TARGET" HOST_SSH_PORT="$HOST_SSH_PORT" \
+        NPU_QUERY_BACKEND="$NPU_QUERY_BACKEND" \
+        NPU_IDLE_MAX_USED_MIB="$NPU_IDLE_MAX_USED_MIB" \
+        PYTHON_BIN="$PYTHON_BIN" \
         "$SCRIPT_DIR/query_host_npu.sh"
 }
 

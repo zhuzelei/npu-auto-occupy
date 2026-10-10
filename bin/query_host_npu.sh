@@ -2,13 +2,26 @@
 
 set -o pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOST_SSH_TARGET=${HOST_SSH_TARGET:-root@127.0.0.1}
 HOST_SSH_PORT=${HOST_SSH_PORT:-22}
 SSH_ATTEMPTS=${SSH_ATTEMPTS:-3}
+NPU_QUERY_BACKEND=${NPU_QUERY_BACKEND:-auto}
+NPU_IDLE_MAX_USED_MIB=${NPU_IDLE_MAX_USED_MIB:-512}
+PYTHON_BIN=${PYTHON_BIN:-/usr/local/python3.11.15/bin/python}
+
+case "$NPU_QUERY_BACKEND" in
+    auto|npu-smi|torch) ;;
+    *)
+        printf 'invalid NPU_QUERY_BACKEND: %s\n' "$NPU_QUERY_BACKEND" >&2
+        exit 2
+        ;;
+esac
 
 tmp_output=$(mktemp)
 trap 'rm -f "$tmp_output"' EXIT
 
+if [[ "$NPU_QUERY_BACKEND" != torch ]]; then
 for ((ssh_attempt = 1; ssh_attempt <= SSH_ATTEMPTS; ssh_attempt++)); do
 if ssh -T \
     -o BatchMode=yes \
@@ -22,6 +35,7 @@ set -o pipefail
 source /usr/local/Ascend/cann/set_env.sh 2>/dev/null || true
 source /usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash 2>/dev/null || true
 DOCKER_ROOT=${DOCKER_ROOT:-/data/z00894965/docker-daemon}
+command -v npu-smi >/dev/null 2>&1 || exit 127
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -104,6 +118,24 @@ then
 fi
 [[ "$ssh_attempt" -lt "$SSH_ATTEMPTS" ]] && sleep 1
 done
+fi
 
-printf 'query_failed after %s SSH attempts\n' "$SSH_ATTEMPTS" >&2
-exit 1
+if [[ "$NPU_QUERY_BACKEND" == npu-smi ]]; then
+    printf 'query_failed after %s SSH attempts\n' "$SSH_ATTEMPTS" >&2
+    exit 1
+fi
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    PYTHON_BIN=$(command -v python3 || command -v python || true)
+fi
+[[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || {
+    printf 'torch query failed: Python executable not found\n' >&2
+    exit 1
+}
+[[ -f "$SCRIPT_DIR/query_npu_torch.py" ]] || {
+    printf 'torch query failed: %s/query_npu_torch.py not found\n' "$SCRIPT_DIR" >&2
+    exit 1
+}
+
+NPU_IDLE_MAX_USED_MIB="$NPU_IDLE_MAX_USED_MIB" \
+    exec "$PYTHON_BIN" "$SCRIPT_DIR/query_npu_torch.py"
